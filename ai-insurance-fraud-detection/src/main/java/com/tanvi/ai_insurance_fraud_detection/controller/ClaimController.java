@@ -7,7 +7,12 @@ import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
-
+import org.apache.pdfbox.rendering.PDFRenderer;
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
+import java.util.Base64;
+import java.util.ArrayList;
 
 import java.io.File;
 import java.io.IOException;
@@ -85,23 +90,49 @@ public class ClaimController {
 
 
     @PostMapping("/extract")
-    public String extractPdfText(@RequestParam("file") MultipartFile file)
-            throws IOException{
-        PDDocument document = PDDocument.load(file.getInputStream());
+    public ResponseEntity<String> extractDocument(@RequestParam("file") MultipartFile file)
+            throws IOException {
 
-        PDFTextStripper pdfStripper = new PDFTextStripper();
+        String contentType = file.getContentType();
 
-        String text = pdfStripper.getText(document);
-
-        if(text == null || text.trim().isEmpty() || text.length() < 20){
-
-            return geminiService.analyzeDocument("Analyze scanned insurance document");
-
-        }
-        else{
-
-            return text;
-        }
+        // CASE 1: direct image upload (jpg, png)
+        if (contentType != null && contentType.startsWith("image/")) {
+            String base64Image = Base64.getEncoder()
+                    .encodeToString(file.getBytes());
+            String result = geminiService.analyzeImageDocument(base64Image, contentType);
+            return ResponseEntity.ok(result);
         }
 
+        // CASE 2: PDF upload
+        if (contentType != null && contentType.equals("application/pdf")) {
+            try (PDDocument document = PDDocument.load(file.getInputStream())) {
+
+                // try text extraction first
+                PDFTextStripper stripper = new PDFTextStripper();
+                String text = stripper.getText(document);
+
+                if (text != null && text.trim().length() >= 20) {
+                    // digital PDF — use text
+                    return ResponseEntity.ok(geminiService.analyzeTextDocument(text));
+                }
+
+                // scanned PDF — render to image and send to Gemini Vision
+                PDFRenderer renderer = new PDFRenderer(document);
+                List<String> results = new ArrayList<>();
+
+                for (int i = 0; i < document.getNumberOfPages(); i++) {
+                    BufferedImage image = renderer.renderImageWithDPI(i, 150);
+                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                    ImageIO.write(image, "PNG", baos);
+                    String base64 = Base64.getEncoder()
+                            .encodeToString(baos.toByteArray());
+                    results.add(geminiService.analyzeImageDocument(base64, "image/png"));
+                }
+
+                return ResponseEntity.ok(String.join("\n\n", results));
+            }
+        }
+
+        return ResponseEntity.badRequest()
+                .body("Unsupported file type. Upload a PDF or image (JPG/PNG).");
     }
